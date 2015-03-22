@@ -15,7 +15,19 @@ module("L_Arduino", package.seeall)
 -- modify it under the terms of the GNU General Public License
 -- version 2 as published by the Free Software Foundation.
 --
-  
+
+
+-- number of times to retry each message
+local MyRetries = 10
+-- seconds to wait until next check
+local MyWait = 5
+
+local MyPrefix = "****<-*->**** " -- only used for logging clarity
+local MyMsgs = {}
+local MyMsgsRetries = {}
+local nowChecking = false
+local processingMsg = false
+
 local PLUGIN_NAME = "MySensors Gateway Plugin"
 local PLUGIN_VERSION = "1.4"
 local GATEWAY_VERSION = ""
@@ -171,7 +183,7 @@ local function log(text, level)
     elseif (text == nil) then
 		luup.log("Arduino: nil-value" , (level or 50))
 	else    
-		luup.log("Arduino: " .. text, (level or 50))
+		luup.log(MyPrefix .. "Arduino: " .. text, (level or 50))
 	end
 end
 
@@ -180,7 +192,7 @@ end
 -- Return true if changed or false if no change
 --
 function setVariableIfChanged(serviceId, name, value, deviceId)
-    log(serviceId ..","..name..", "..value..", ".. deviceId)
+    log(MyPrefix .. serviceId ..","..name..", "..value..", ".. deviceId)
     local curValue = luup.variable_get(serviceId, name, deviceId)
     
     if ((value ~= curValue) or (curValue == nil) or (serviceId == "urn:micasaverde-com:serviceId:SceneController1")) then
@@ -291,7 +303,6 @@ end
 function sendRequestResponse(altid, variableId, value)
 	return sendCommandWithMessageType(altid, "SET", 0, tonumber(tVarTypes[variableId][1]), value)
 end
-
 
 
 local function presentation(incomingData, device, childId, altId)
@@ -411,9 +422,9 @@ local function processInternalMessage(incomingData, iChildId, iAltId, incomingNo
 	elseif (varType == "CHILDREN") then
 		setVariableIfChanged(var[2], var[3], data, iChildId)
 	elseif (varType == "LOG_MESSAGE" or varType == "GATEWAY_READY") then
-		log("Log: "..data)
+		log(MyPrefix .. "Log MSG: "..data)
 	else
-		log("Incoming internal command '" .. table.concat(incomingData, ";") .. "' discarded for child: " .. (iChildId ~= nil and iChildId or "nil"), 2)
+		log(MyPrefix .. "Incoming internal command '" .. table.concat(incomingData, ";") .. "' discarded for child: " .. (iChildId ~= nil and iChildId or "nil"), 2)
 	end
 end
 
@@ -440,18 +451,140 @@ local function requestStatus(incomingData, childId, altId)
 	
 end
 
+-- ********* START ************* MyFunctions QUEUE ******************************
+
+-- adds cmd msg to the list before sending
+function addToMyQueue(myCmd)
+
+	local isFound = inTable(MyMsgs, myCmd)
+	-- if not already in the list, add it
+	if (isFound == false) then
+		table.insert( MyMsgs, myCmd )
+		table.insert( MyMsgsRetries, 0)
+	end
+	
+end
+
+-- check if msg is in the list to remove it
+function checkMyQueue(msg)
+	log(MyPrefix .. ">T> queue        : " .. printTable(MyMsgs) )
+	log(MyPrefix .. ">T> queue retries: " .. printTable(MyMsgsRetries) )
+	local isFound = inTable(MyMsgs, msg);
+	-- if msg found, remove it because has been executed
+	if (isFound ~= false) then
+		log("msg found in pos: "..isFound..". Removing from list...")
+		deleteFromQueue(isFound)
+		else
+			log("msg not found in list") 
+		end
+	log(MyPrefix .. ">T> queue updated: " .. printTable(MyMsgs) )
+	log(MyPrefix .. ">T> queue retries: " .. printTable(MyMsgsRetries) )
+end
+
+-- check if item exists in queue
+function inTable(tbl, item)
+    for key, value in pairs(tbl) do
+        if value == item then return key end
+    end
+    return false
+end
+
+-- check for lost messages in order to re-send them
+local function doCheck()
+	log("-=OOOO-CHK-OOOO=- processing: "..tostring(processingMsg)..", cheking: "..tostring(nowChecking))
+	if(processingMsg == false)then
+		local qLen = table.getn(MyMsgs)
+		
+		log("-=OOOO-chk-OOOO=-  queue length: ".. qLen)
+		log("-=OOOO-chk-OOOO=-  queue        : " .. printTable(MyMsgs) )
+		if(qLen >0) then
+
+			local msg=MyMsgs[qLen]
+			local retr=MyMsgsRetries[qLen]
+
+		    log("queue last elem: ".. msg.. " retried: "..retr)
+
+		    -- if more tries than specified, just delete it and give up
+		    if(retr >= MyRetries)then
+		    	deleteFromQueue(qLen)
+		    	log(MyPrefix .. "-=OOOO-del-OOOO=-  too many retries")
+		    	log(MyPrefix .. "-=OOOO-del-OOOO=-  queue        : " .. printTable(MyMsgs) )
+		    	else
+		    		-- if not, update count and resend msg
+		    		MyMsgsRetries[qLen] = retr+1
+		    		log(MyPrefix .. "-=OOOO-snd-OOOO=- resending: "..msg)
+		    		doSendCommand(msg)
+		    	end
+
+			if(qLen-1 == 0) then
+				-- check back in a while
+				log("-=OOOO-snd-OOOO=- set cheking off queue just emptied")
+				nowChecking=false
+				else 
+					startMyTimer()
+				end
+		else
+			nowChecking=false
+			log("-=OOOO-snd-OOOO=- set cheking off queue <= 0")
+		end
+	else
+		if(nowChecking==false)then
+		log("-=OOOO-chk-OOOO=- MSG is being received. Wait for next time")
+		startMyTimer()
+		end
+	end
+	
+end
 
 
-function sendCommandWithMessageType(altid, messageType, ack, variableId, value)
-	local cmd = altid..";".. msgType[messageType] .. ";" .. ack .. ";" .. variableId .. ";" .. value
-	log("Sending: " .. cmd)
+--deletes element from queue
+function deleteFromQueue(pos)
+	table.remove(MyMsgs, pos) 
+	table.remove(MyMsgsRetries, pos)
+end
 
+-- actual function that sends commands
+function doSendCommand(cmd)
+log("-=OOOO-snd-OOOO=- processing: "..tostring(processingMsg)..", cheking: "..tostring(nowChecking))
+   log("*** **** **** **** *** *** Sending: " .. cmd )
 	if (luup.io.write(cmd) == false)  then
 		task("Cannot send command - communications error", TASK_ERROR)
 		luup.set_failure(true)
 		return false
 	end
+	-- check in a while if message is sent correctly (ack), check if already checking
+	if (nowChecking == false) then
+		startMyTimer()
+	end
 	return true
+end
+
+-- starts the timer to check
+function startMyTimer()
+	log("-=OOOO-ooo-OOOO=- starting timer ")
+	luup.call_timer("doCheck", 1, MyWait, "", "")
+	nowChecking=true
+end
+-- ****** END **************** MyFunctions QUEUE******************************
+
+
+function sendCommandWithMessageType(altid, messageType, ack, variableId, value)
+	local cmd = altid..";".. msgType[messageType] .. ";" .. ack .. ";" .. variableId .. ";" .. value
+	log("Sending: " .. cmd)
+	-- only add if SET request
+	if (messageType =="SET") then
+		addToMyQueue(cmd)
+ 	end
+
+ 	-- this replaces the old send function, now done in doSendCommand()
+ 	return doSendCommand(cmd)
+
+	--if (luup.io.write(cmd) == false)  then
+	--	task("Cannot send command - communications error", TASK_ERROR)
+	--	luup.set_failure(true)
+	--	return false
+	--end
+	-- return true
 end
 
 
@@ -486,6 +619,7 @@ end
 
 -- Power and dimmer commands
 function switchPower(device, newTargetValue)
+	log(MyPrefix .. ">F> switchPower")
 	sendCommand(luup.devices[device].id,"LIGHT",newTargetValue)
 end
 
@@ -541,8 +675,17 @@ function string:split(delimiter)
 end
 
 function processIncoming(s)
+	-- disable checking queue while procesing new msg
+	processingMsg = true
+
+	log(MyPrefix .. ">F> processIncoming msg: " .. s)
+	log("-=OOOO-inc-OOOO=- processing: "..tostring(processingMsg)..", cheking: "..tostring(nowChecking))
+
 	local incomingData = s:split(";")
 	if (#incomingData >=4) then
+		-- check if msg is in the queue list to remove it
+		checkMyQueue(s);
+
 		local nodeId = incomingData[1]
 		local childId = incomingData[2]
 		local messageType = incomingData[3];
@@ -565,10 +708,14 @@ function processIncoming(s)
    		 	log("Receive error: No handler for data: "..s, 1)
 		end
 	end
+
+	-- enable checking once done
+	processingMsg = false
 end
 
 
 function startup(lul_device)
+	log(MyPrefix .. ">F> startup")
 	ARDUINO_DEVICE = lul_device
 
 	setVariableIfChanged(ARDUINO_SID, "PluginVersion", PLUGIN_VERSION, ARDUINO_DEVICE)
@@ -649,6 +796,10 @@ function startup(lul_device)
 	-- Request version info from Arduino gateway
 	sendCommandWithMessageType("0;0","INTERNAL",0,tonumber(tInternalTypes["VERSION"][1]),"Get Version")
 	
+	--doCheck() queue timer setup
+	_G["doCheck"] = doCheck
+	-- checking is disabled until a message is sent
+	nowChecking=false
 end
 
 
