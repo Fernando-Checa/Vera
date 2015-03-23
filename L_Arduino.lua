@@ -16,7 +16,6 @@ module("L_Arduino", package.seeall)
 -- version 2 as published by the Free Software Foundation.
 --
 
-
 -- number of times to retry each message
 local MyRetries = 10
 -- seconds to wait until next check
@@ -27,6 +26,7 @@ local MyMsgs = {}
 local MyMsgsRetries = {}
 local nowChecking = false
 local processingMsg = false
+local bufferActive = false
 
 local PLUGIN_NAME = "MySensors Gateway Plugin"
 local PLUGIN_VERSION = "1.4"
@@ -602,6 +602,18 @@ function stopInclusion(device)
 	return sendInternalCommand("0;0","INCLUSION_MODE","0")
 end
 
+-- Arduino GW MyBuffer commands
+function useBuffer(enable)
+	if(enable==1)then
+		bufferActive=true
+		else
+			bufferActive=false
+		end
+	log("******************** buffer is "..tostring(bufferActive).."   enable: "..tostring(enable) )
+end
+
+
+
 -- Arduino relay node device commands
 
 function clearChildren(device)
@@ -789,7 +801,14 @@ function startup(lul_device)
 		setVariableIfChanged(ARDUINO_SID, "Unit", "M", ARDUINO_DEVICE)
 	end
 
+	local variable2 = luup.variable_get(ARDUINO_SID, "buffer_active", ARDUINO_DEVICE)
+	if (variable2 == 1) then
+		bufferActive=true
+		else
+			bufferActive=false
+		end
 
+	log("** START ****************** buffer is "..tostring(bufferActive))
 
 	GATEWAY_VERSION = luup.variable_get(ARDUINO_SID, "ArduinoLibVersion", ARDUINO_DEVICE)
 
