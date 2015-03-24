@@ -19,7 +19,7 @@ module("L_Arduino", package.seeall)
 -- number of times to retry each message
 local MyRetries = 10
 -- seconds to wait until next check
-local MyWait = 5
+local MyWait = 1
 
 local MyPrefix = "****<-*->**** " -- only used for logging clarity
 local MyMsgs = {}
