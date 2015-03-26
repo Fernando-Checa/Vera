@@ -516,7 +516,7 @@ local function doCheck()
 		    		doSendCommand(msg)
 		    	end
 
-			if(qLen-1 == 0) then
+			if(qLen == 0 ) then
 				-- check back in a while
 				log("-=OOOO-snd-OOOO=- set cheking off queue just emptied")
 				nowChecking=false
@@ -572,7 +572,7 @@ function sendCommandWithMessageType(altid, messageType, ack, variableId, value)
 	local cmd = altid..";".. msgType[messageType] .. ";" .. ack .. ";" .. variableId .. ";" .. value
 	log("Sending: " .. cmd)
 	-- only add if SET request
-	if (messageType =="SET") then
+	if (messageType =="SET" and ack==1) then
 		addToMyQueue(cmd)
  	end
 
